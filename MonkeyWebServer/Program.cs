@@ -107,6 +107,7 @@ public static class MonkeyServer
 
             if (endpoint != null)
             {
+        
                 // Execute the endpoint and send the response
                 Logger.LogIncoming($"Handling endpoint: §2{urlPath}");
                 MonkeyResponse monkeyresponse = endpoint.Execute(context);
@@ -116,8 +117,11 @@ public static class MonkeyServer
             else
             {
                 Logger.LogIncoming($"Coudlnt find endpoint: §4{urlPath}, §8did you register it using §6MonkeyEndpoints§8.§2AddEndpoint§12()§8?");
-                // No matching endpoint found, send a 404 response
-                context.Response.StatusCode = 404;
+                dynamic error = new ExpandoObject();
+                error.message = "Your team of monkeys couldnt find the endpoint you just tried to navigate to, Did you register it using: MonkeyEndpoints.AddEndpoint()?";
+                error.endpoint = urlPath;
+                MonkeyResponse resp = MonkeyResponse.RenderTemplate(context.Response, "./internal/monkey-error.html", new { Error = error });
+                await resp.response.OutputStream.WriteAsync(resp.responseData, 0, resp.responseData.Length);
                 context.Response.Close();
             }
         }
