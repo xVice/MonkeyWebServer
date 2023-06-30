@@ -6,6 +6,8 @@ A Csharp WebServer powered by Monke.
 - Easy routing.
 - cool dev errors.
 
+![monkeerror img](https://github.com/xVice/storage/blob/main/monkeyerror.PNG?raw=true)
+
 # Usage
 ```csharp
 public class Prog
