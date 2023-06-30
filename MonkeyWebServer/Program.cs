@@ -1,4 +1,5 @@
 ﻿using MonkeyWebServer;
+using Newtonsoft.Json;
 using Scriban;
 using System;
 using System.Dynamic;
@@ -12,6 +13,7 @@ public class Prog
     public static void Main(string[] args)
     {
         MonkeyEndpoints.AddEndpoint(new ExampleEndpoint());
+        MonkeyEndpoints.AddEndpoint(new ExampleJsonEndpoint());
 
         MonkeyServer.StartServer();
         MonkeyServer.AddPrefix("http://localhost:8000/");
@@ -38,6 +40,24 @@ public class ExampleEndpoint : MonkeyEndpoint
         };
 
         return MonkeyResponse.RenderTemplate(ctx.Response, "./templates/test.html", new { Products = ProductList });
+    }
+}
+
+public class ExampleJsonEndpoint : MonkeyEndpoint
+{
+    public override string Endpoint { get => "/testjson"; }
+
+    public override MonkeyResponse Execute(HttpListenerContext ctx)
+    {
+        var ProductList = new List<dynamic>
+        {
+            new { name = "Product 1", price = 10.99, description = "Lorem ipsum dolor sit amet" },
+            new { name = "Product 2", price = 19.99, description = "Consectetur adipiscing elit" },
+            new { name = "Product 3", price = 5.99, description = "Sed do eiusmod tempor" },
+            new { name = "Product 4", price = 5.2449, description = "Sedo do edsdiusmod tempor" },
+        };
+
+        return MonkeyResponse.Json(ctx.Response, ProductList);
     }
 }
 
@@ -144,6 +164,34 @@ public class MonkeyResponse
         this.responseData = responseData;
     }
 
+    public static MonkeyResponse Json(HttpListenerResponse response, object jsonData)
+    {
+        string jsonString = JsonConvert.SerializeObject(jsonData);
+        byte[] data = Encoding.UTF8.GetBytes(jsonString);
+
+        response.StatusCode = 200;
+        response.ContentType = "application/json";
+        response.ContentEncoding = Encoding.UTF8;
+        response.ContentLength64 = data.LongLength;
+
+        return new MonkeyResponse(response, data);
+    }
+
+
+    public static MonkeyResponse Json(HttpListenerResponse response, object jsonData, int statusCode)
+    {
+        string jsonString = JsonConvert.SerializeObject(jsonData);
+        byte[] data = Encoding.UTF8.GetBytes(jsonString);
+
+        response.StatusCode = statusCode;
+        response.ContentType = "application/json";
+        response.ContentEncoding = Encoding.UTF8;
+        response.ContentLength64 = data.LongLength;
+
+        return new MonkeyResponse(response, data);
+    }
+
+
     public static MonkeyResponse RenderTemplate(HttpListenerResponse response, string templatePath, object templateData)
     {
         string templateSource = File.ReadAllText(templatePath);
@@ -153,6 +201,22 @@ public class MonkeyResponse
         byte[] data = Encoding.UTF8.GetBytes(result);
 
         response.StatusCode = 200;
+        response.ContentType = "text/html";
+        response.ContentEncoding = Encoding.UTF8;
+        response.ContentLength64 = data.LongLength;
+
+        return new MonkeyResponse(response, data);
+    }
+
+    public static MonkeyResponse RenderTemplate(HttpListenerResponse response, string templatePath, object templateData, int statusCode)
+    {
+        string templateSource = File.ReadAllText(templatePath);
+        Template template = Template.Parse(templateSource);
+
+        string result = template.Render(templateData);
+        byte[] data = Encoding.UTF8.GetBytes(result);
+
+        response.StatusCode = statusCode;
         response.ContentType = "text/html";
         response.ContentEncoding = Encoding.UTF8;
         response.ContentLength64 = data.LongLength;
