@@ -61,3 +61,7 @@ public class ExampleJsonEndpoint : MonkeyEndpoint
     }
 }
 ```
+
+## License
+
+This project is licensed under the [MIT License](LICENSE).
