@@ -1,8 +1,8 @@
 # MonkeyWebServer
 A Csharp WebServer powered by Monke.
 
-- Template Rendering.
-- Json responses.
+- Template Rendering using Scriban.
+- Json responses using NewtonsoftJson.
 - Easy routing.
 - cool dev errors.
 
