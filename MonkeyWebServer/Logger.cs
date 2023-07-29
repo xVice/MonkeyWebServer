@@ -11,20 +11,42 @@ namespace MonkeyWebServer
     {
         private static object lockObj = new object();
 
-        public static void LogIncoming(string message)
+        public static void LogError(string message, bool verbose = true)
         {
+            if (!verbose)
+            {
+                return;
+            }
+            FormatMessage("§6SERVER §10!!§4", message);
+
+        }
+
+        public static void LogIncoming(string message, bool verbose = true)
+        {
+            if (!verbose)
+            {
+                return;
+            }
             FormatMessage("§6SERVER §10<-§8", message);
 
         }
 
-        public static void Log(string message)
+        public static void Log(string message, bool verbose = true)
         {
-            FormatMessage("§6SERVER §10-§8", message);
+            if (!verbose)
+            {
+                return;
+            }
+            FormatMessage("§6SERVER §10--§8", message);
 
         }
 
-        public static void LogOutgoing(string message)
+        public static void LogOutgoing(string message, bool verbose = true)
         {
+            if (!verbose)
+            {
+                return;
+            }
             FormatMessage("§6SERVER §10->§8", message);
 
         }
