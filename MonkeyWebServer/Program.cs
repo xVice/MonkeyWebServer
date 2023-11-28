@@ -236,7 +236,8 @@ public static class MonkeyServer
         if (existingEndpoint != null)
         {
             // Create a new instance of MonkeyEndpoint using MemberwiseClone method
-            MonkeyEndpoint newEndpoint = (MonkeyEndpoint)existingEndpoint.DuplicateRaw();
+            var newEndpoint = (MonkeyEndpoint)Activator.CreateInstance(existingEndpoint.GetType());
+            //MonkeyEndpoint newEndpoint = (MonkeyEndpoint)existingEndpoint.DuplicateRaw();
 
 
             return newEndpoint;
@@ -478,7 +479,7 @@ public class MonkeyResponse
         //first this
         string result = GetRenderedTemplate(templateText, view);
 
-        var mreq = BuildContenxt(req, 200, result);
+        var mreq = BuildContext(req, 200, result);
 
         return new MonkeyResponse(mreq) { content = Encoding.UTF8.GetBytes(result) };
     
@@ -488,7 +489,7 @@ public class MonkeyResponse
     {
         string result = GetRenderedTemplate(templateText, view);
         byte[] data = Encoding.UTF8.GetBytes(result);
-        var mreq = BuildContenxt(req, statusCode, result);
+        var mreq = BuildContext(req, statusCode, result);
 
         return new MonkeyResponse(mreq) { content = data };
     }
@@ -499,7 +500,7 @@ public class MonkeyResponse
         string templateSource = File.ReadAllText(templatePath);
         string result = GetRenderedTemplate(templateSource, view);
         byte[] data = Encoding.UTF8.GetBytes(result);
-        var mreq = BuildContenxt(req, 200, result);
+        var mreq = BuildContext(req, 200, result);
 
         return new MonkeyResponse(mreq) { content = data};
     }
@@ -509,7 +510,7 @@ public class MonkeyResponse
         string templateSource = File.ReadAllText(templatePath);
         string result = GetRenderedTemplate(templateSource, view);
         byte[] data = Encoding.UTF8.GetBytes(result);
-        var mreq = BuildContenxt(req, statusCode, result);
+        var mreq = BuildContext(req, statusCode, result);
 
         return new MonkeyResponse(mreq) { content = data };
     }
@@ -520,7 +521,7 @@ public class MonkeyResponse
         return template.Render(view);
     }
 
-    private static MonkeyRequest BuildContenxt(MonkeyRequest req, int statusCode, string data)
+    private static MonkeyRequest BuildContext(MonkeyRequest req, int statusCode, string data)
     {
         byte[] databytes = Encoding.UTF8.GetBytes(data);
 
