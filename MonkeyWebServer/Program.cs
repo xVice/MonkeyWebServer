@@ -2,23 +2,61 @@
 using Newtonsoft.Json;
 using Newtonsoft.Json.Linq;
 using Scriban;
+using System;
 using System.Collections.Generic;
 using System.Collections.Specialized;
+using System.Diagnostics;
 using System.IO;
 using System.Net;
+using System.Reflection;
+using System.Security;
 using System.Text;
+using System.Threading.Tasks;
 using System.Web;
 
 #region MonkeyServer
-public static class MonkeyServer
-{
-    public static HttpListener listener;
-    public static string url = "http://localhost:8000/";
-    private static bool verbose = false;
-    private static bool runServer = false;
-    private static bool isDebug = false;
 
-    private static string errorTemplate = @"<!DOCTYPE html>
+public class PluginConfig
+{
+    public string NameSpace = string.Empty;
+    public string Class = string.Empty;
+    public string Function = string.Empty;
+    public string PluginName = string.Empty;
+
+    public PluginConfig()
+    {
+
+    }
+}
+
+public class MonkeyServer
+{
+    private HttpListener listener = null;
+    private MonkeyEndpoints endPoints = null;
+    private string url = "http://localhost:8000/";
+    private bool verbose = false;
+    private bool runServer = false;
+    private bool isDebug = false;
+
+    public MonkeyServer(string url, bool debug, bool verbose)
+    {
+        this.url = url;
+        listener = new HttpListener();
+        endPoints = new MonkeyEndpoints();
+        StartServer(debug, verbose);
+    }
+
+    public MonkeyEndpoints GetEndpoints()
+    {
+        return endPoints;
+    }
+
+    public HttpListener GetHTTPListener()
+    {
+        return listener;
+    }
+
+    private string errorTemplate = @"<!DOCTYPE html>
                                             <html>
                                             <head>
                                                 <title>Error</title>
@@ -79,160 +117,231 @@ public static class MonkeyServer
                                             </html>
                                             ";
 
-    public static void StartServer(bool Debug)
+    public void SetErrorTemplate(string templateText)
     {
-        isDebug = Debug;
-        if (runServer == false)
+        errorTemplate = templateText;
+    }
+
+    public void SetErrorTemplateFromFile(string filePath)
+    {
+        if (File.Exists(filePath))
         {
-            listener = new HttpListener();
-            listener.Start();
-            Logger.Log($"Listening for requests on§2 {url}", verbose);
-            runServer = true;
+            SetErrorTemplate(File.ReadAllText(filePath));
+        }
+        else
+        {
+            Logger.Log("Error Template file doesnt exist: " + filePath);
         }
     }
 
-    public static void StartServer(bool Debug, bool Verbose)
+    public void LoadPlugin(string path)
+    {
+        if (!Directory.Exists(path))
+        {
+            Logger.Log("The Plugin: " + path + ", is not a folder!");
+            return;
+        }
+
+        var cfgFiles = Directory.GetFiles(path, "*.json");
+        var dllFiles = Directory.GetFiles(path, "*.dll");
+
+        var cfg = JsonConvert.DeserializeObject<PluginConfig>(File.ReadAllText(cfgFiles[0]));
+
+        foreach (var dllFile in dllFiles)
+        {
+            try
+            {
+                // Load the assembly from the DLL file
+                Assembly assembly = Assembly.LoadFrom(dllFile);
+
+                // Find the MonkeyPlugin type in the assembly
+                Type monkeyPluginType = assembly.GetType($"{cfg.NameSpace}.{cfg.Class}");
+
+                if (monkeyPluginType != null)
+                {
+                    // Get the static Main method
+                    MethodInfo mainMethod = monkeyPluginType.GetMethod(cfg.Function, BindingFlags.Public | BindingFlags.Static);
+
+                    if (mainMethod != null)
+                    {
+                        // Invoke the Main method (pass null for static methods)
+                        mainMethod.Invoke(null, new object[] { this });
+                        Logger.Log("A plugin has been loaded!");
+                    }
+                    else
+                    {
+                        Logger.Log("Main method not found in MonkeyPlugin in: " + dllFile);
+                    }
+                }
+                else
+                {
+                    Logger.Log("MonkeyPlugin type not found in: " + dllFile);
+                }
+            }
+            catch (Exception ex)
+            {
+                Logger.Log("Error loading plugin from " + dllFile + ": " + ex);
+            }
+        }
+    }
+
+
+    public void StartServer(bool Debug, bool Verbose)
     {
         isDebug = Debug;
         verbose = Verbose;
         if (runServer == false)
         {
-            listener = new HttpListener();
-            listener.Start();
-            Logger.Log($"Listening for requests on§2 {url}", verbose);
+            
             runServer = true;
+            listener.Start();
+            AddPrefix(url);
+            Logger.Log($"Listening for requests on§2 {url}", verbose);
+            Task.Run(() => HandleIncomingConnections());
         }
     }
 
-    public static void StartServer()
-    {
-        if (runServer == false)
-        {
-            listener = new HttpListener();
-            listener.Start();
-            Logger.Log($"Listening for requests on§2 {url}", verbose);
-            runServer = true;
-        }
-    }
-
-    public static void AddPrefix(string prefix)
+    public void AddPrefix(string prefix)
     {
         listener.Prefixes.Add(prefix);
     }
 
-    public static void StopServer()
+    public void StopServer()
     {
         runServer = false;
     }
 
-    public static async Task HandleIncomingConnections()
+    private async void HandleFaviconRequest(HttpListenerContext context)
     {
-        StartServer();
-        while (runServer)
+        if (File.Exists("./favicon.ico"))
         {
-            HttpListenerContext context;
+            Logger.Log($"Serving favicon..", verbose);
+            // Load the icon file into a byte array
+            byte[] iconData = File.ReadAllBytes("./favicon.ico");
+
+            // Set the appropriate response headers
+            context.Response.ContentType = "image/x-icon";
+            context.Response.ContentLength64 = iconData.Length;
+
+            // Write the icon data to the response stream
+            await context.Response.OutputStream.WriteAsync(iconData, 0, iconData.Length);
+        }
+        else
+        {
+            Logger.Log("Favicon not found, place it into the project folder and call it: favicon.ico", verbose);
+        }
+        context.Response.Close();
+    }
+
+
+    private void HandleEndpointNotFound(HttpListenerContext context, string urlPath)
+    {
+        if (isDebug)
+        {
+            Logger.LogIncoming($"Couldn't find endpoint: §4{urlPath}, §8did you register it using §6MonkeyEndpoints§8.§2AddEndpoint§12()§8?", verbose);
+
+
+            MonkeyResponse resp = MonkeyResponse.RenderTemplateText(new MonkeyRequest(context), errorTemplate, new { endpoint = urlPath, error = "Your team of monkeys couldn't find the endpoint you just tried to navigate to. Did you register it using: MonkeyEndpoints.AddEndpoint()?" }); ;
+            resp.SendToClient();
+        }
+        else
+        {
+            MonkeyResponse monkeyresponseerr2 = MonkeyResponse.Text(new MonkeyRequest(context), "Error 500", 500);
+            monkeyresponseerr2.SendToClient();
+        }
+    }
+
+    private async Task ProcessRequest(HttpListenerContext context)
+    {
+        string urlPath = context.Request.Url.AbsolutePath;
+        Logger.Log(urlPath);
+
+        if (urlPath == "/favicon.ico")
+        {
+            // Handle favicon request
+            HandleFaviconRequest(context);
+        }
+        else
+        {
+            // Handle other requests
+            HandleOtherRequest(context, urlPath);
+        }
+    }
+
+    private void HandleOtherRequest(HttpListenerContext context, string urlPath)
+    {
+        MonkeyEndpoint endpoint = Find(urlPath);
+
+        if (endpoint != null)
+        {
             try
             {
-                // Wait for a request to come in
-                context = await listener.GetContextAsync();
-
-                // Get the URL path from the request
-                string urlPath = context.Request.Url.AbsolutePath;
-
-                if (urlPath == "/favicon.ico")
-                {
-                    if (File.Exists("./favicon.ico"))
-                    {
-                        Logger.Log($"Serving favicon..", verbose);
-                        // Load the icon file into a byte array
-                        byte[] iconData = File.ReadAllBytes("./favicon.ico");
-
-                        // Set the appropriate response headers
-                        context.Response.ContentType = "image/x-icon";
-                        context.Response.ContentLength64 = iconData.Length;
-
-                        // Write the icon data to the response stream
-                        await context.Response.OutputStream.WriteAsync(iconData, 0, iconData.Length);
-                    }
-                    else
-                    {
-                        Logger.Log("Favicon not found, place it into the project folder and call it: favicon.ico", verbose);
-                    }
-
-                    // Close the response
-                    context.Response.Close();
-                }
-                else
-                {
-                    // Find the matching endpoint based on the URL path
-                    MonkeyEndpoint endpoint = Find(urlPath);
-
-                    if (endpoint != null)
-                    {
-                        try
-                        {
-                            // Execute the endpoint and send the response
-                            Logger.LogIncoming($"Handling endpoint: §2{urlPath}", verbose);
-                            MonkeyResponse monkeyresponse = endpoint.Execute(new MonkeyRequest(context));
-                            monkeyresponse.SendToClient();
-                        }
-                        catch (Exception ex)
-                        {
-                            Logger.LogIncoming($"Error encountered while handling the endpoint: §4{urlPath}", verbose);
-                            if (isDebug)
-                            {
-                                Logger.Log(ex.Message, verbose);
-                                MonkeyResponse monkeyresponseerr = MonkeyResponse.RenderTemplateText(new MonkeyRequest(context), errorTemplate, new { endpoint = urlPath, error = ex.Message });
-
-                                monkeyresponseerr.SendToClient();
-                            }
-                            else
-                            {
-                                MonkeyResponse monkeyresponseerr2 = MonkeyResponse.Text(new MonkeyRequest(context), "Error 500", 500);
-                                monkeyresponseerr2.SendToClient();
-                            }
-                        }
-                    }
-                    else
-                    {
-                        if (isDebug)
-                        {
-                            Logger.LogIncoming($"Couldn't find endpoint: §4{urlPath}, §8did you register it using §6MonkeyEndpoints§8.§2AddEndpoint§12()§8?", verbose);
- 
-  
-                            MonkeyResponse resp = MonkeyResponse.RenderTemplateText(new MonkeyRequest(context), errorTemplate, new { endpoint = urlPath, error = "Your team of monkeys couldn't find the endpoint you just tried to navigate to. Did you register it using: MonkeyEndpoints.AddEndpoint()?" }); ;
-                            resp.SendToClient();
-                        }
-                        else
-                        {
-                            MonkeyResponse monkeyresponseerr2 = MonkeyResponse.Text(new MonkeyRequest(context), "Error 500", 500);
-                            monkeyresponseerr2.SendToClient();
-                        }
-                    }
-
-                    // Close the response for all cases
-                    context.Response.Close();
-                }
-            }
-            catch (HttpListenerException ex)
-            {
-                // Handle exceptions related to the HttpListener
-                // For example, if the listener is closed while waiting for a request
-                Logger.LogError($"HttpListener Exception: {ex.Message}");
+                // Execute the endpoint and send the response
+                Logger.LogIncoming($"Handling endpoint: §2{urlPath}", verbose);
+                MonkeyResponse monkeyresponse = endpoint.Execute(new MonkeyRequest(context));
+                monkeyresponse.SendToClient();
             }
             catch (Exception ex)
             {
-                // Handle other exceptions
-                Logger.LogError($"Unhandled Exception: {ex.Message}");
+                Logger.LogIncoming($"Error encountered while handling the endpoint: §4{urlPath}", verbose);
+                HandleErrorResponse(context, ex, urlPath);
+            }
+        }
+        else
+        {
+            HandleEndpointNotFound(context, urlPath);
+        }
+        context.Response.Close();
+    }
+
+    private void HandleErrorResponse(HttpListenerContext context, Exception ex, string urlPath)
+    {
+        Logger.LogIncoming($"Error encountered while handling the endpoint: §4{urlPath}", verbose);
+        if (isDebug)
+        {
+            Logger.Log(ex.Message, verbose);
+            MonkeyResponse monkeyresponseerr = MonkeyResponse.RenderTemplateText(new MonkeyRequest(context), errorTemplate, new { endpoint = urlPath, error = ex.Message });
+
+            monkeyresponseerr.SendToClient();
+        }
+        else
+        {
+            MonkeyResponse monkeyresponseerr2 = MonkeyResponse.Text(new MonkeyRequest(context), "Error 500", 500);
+            monkeyresponseerr2.SendToClient();
+        }
+    }
+
+
+    public async Task HandleIncomingConnections()
+    {
+        while (runServer)
+        {
+            HttpListenerContext context;
+
+            try
+            {
+                context = await listener.GetContextAsync();
+
+                // Use Task.Run with TaskCreationOptions.LongRunning to run the task on a dedicated thread
+                Task.Run(() => ProcessRequest(context));
+            }
+            catch (HttpListenerException ex)
+            {
+                Logger.LogError($"HttpListener Exception: {ex}");
+            }
+            catch (Exception ex)
+            {
+                Logger.LogError($"Unhandled Exception: {ex}");
             }
         }
     }
 
-   
 
-    public static MonkeyEndpoint Find(string urlPath)
+
+
+    public MonkeyEndpoint Find(string urlPath)
     {
-        MonkeyEndpoint existingEndpoint = MonkeyEndpoints.EndPoints.Find(x => x.Endpoint == urlPath);
+        MonkeyEndpoint existingEndpoint = endPoints.EndPoints.Find(x => x.Endpoint == urlPath);
         if (existingEndpoint != null)
         {
             // Create a new instance of MonkeyEndpoint using MemberwiseClone method
@@ -254,6 +363,8 @@ public abstract class MonkeyEndpoint
 {
     public abstract string Endpoint { get; }
 
+
+
     public abstract MonkeyResponse Execute(MonkeyRequest req);
 
     public MonkeyEndpoint DuplicateRaw()
@@ -262,78 +373,64 @@ public abstract class MonkeyEndpoint
     }
 }
 
-public static class MonkeyEndpoints
+public class MonkeyEndpoints
 {
-    public static List<MonkeyEndpoint> EndPoints = new List<MonkeyEndpoint>();
+    public List<MonkeyEndpoint> EndPoints = new List<MonkeyEndpoint>();
 
-    public static void AddEndpoint(MonkeyEndpoint endpoint)
+    public void AddEndpoint(MonkeyEndpoint endpoint)
     {
         EndPoints.Add(endpoint);
+    }
+
+    public void AddEndpoints(params MonkeyEndpoint[] endpoint)
+    {
+        EndPoints.AddRange(endpoint);
     }
 }
 
 
 public class MonkeyRequest
 {
-    public JObject jsonReq;
+    public JObject JsonReq { get; set; }
+    public NameValueCollection Get { get; set; }
+    public NameValueCollection Post { get; set; }
+    public Dictionary<string, HttpFile> Files { get; set; }
 
-    public HttpListenerContext ctx;
-    public HttpNameValueCollection Data;
+    private HttpListenerContext ctx = null;
 
-    public MonkeyRequest(HttpListenerContext ctx) 
+    public MonkeyRequest(HttpListenerContext ctx)
     {
         this.ctx = ctx;
-        HandleContext();
-    }
+        Get = ctx.Request.QueryString;
+        Post = new NameValueCollection();
+        Files = new Dictionary<string, HttpFile>();
 
-    public string GetContent()
-    {
-        var request = ctx.Request;
-        string content;
-        using (var reader = new StreamReader(request.InputStream,
-                                             request.ContentEncoding))
+        if (ctx.Request.ContentType == "application/json")
         {
-            content = reader.ReadToEnd();
+            JsonReq = JsonConvert.DeserializeObject<JObject>(GetContent(ctx.Request.InputStream, ctx.Request.ContentEncoding));
         }
-        return content;
-    }
-
-
-    void HandleContext()
-    {
-        if(ctx.Request.ContentType == "application/json")
+        else if (ctx.Request.HttpMethod == "POST" && ctx.Request.ContentType?.StartsWith("multipart/form-data") == true)
         {
-            jsonReq = JsonConvert.DeserializeObject<JObject>(GetContent());
+            PopulatePostMultiPart(ctx, ctx.Request.InputStream, ctx.Request.ContentEncoding);
         }
-        Data = new HttpNameValueCollection(ref ctx);
-    }
-}
-
-
-public class HttpNameValueCollection
-{
-    public class File
-    {
-        private string _fileName;
-        public string FileName { get { return _fileName ?? (_fileName = ""); } set { _fileName = value; } }
-
-        private string _fileData;
-        public string FileData { get { return _fileData ?? (_fileName = ""); } set { _fileData = value; } }
-
-        private string _contentType;
-        public string ContentType { get { return _contentType ?? (_contentType = ""); } set { _contentType = value; } }
+        else
+        {
+            PopulatePost(ctx.Request.InputStream, ctx.Request.ContentEncoding);
+        }
     }
 
-    private NameValueCollection _get;
-    private Dictionary<string, File> _files;
-    private readonly HttpListenerContext _ctx;
-
-    public NameValueCollection Get { get { return _get ?? (_get = new NameValueCollection()); } set { _get = value; } }
-    public NameValueCollection Post { get { return _ctx.Request.QueryString; } }
-    public Dictionary<string, File> Files { get { return _files ?? (_files = new Dictionary<string, File>()); } set { _files = value; } }
-
-    private void PopulatePostMultiPart(string post_string)
+    private string GetContent(Stream inputStream, Encoding encoding)
     {
+        using (var reader = new StreamReader(inputStream, encoding))
+        {
+            return reader.ReadToEnd();
+        }
+    }
+
+    private void PopulatePostMultiPart(HttpListenerContext _ctx, Stream inputStream, Encoding encoding)
+    {
+        var post_string = GetContent(inputStream, encoding);
+
         var boundary_index = _ctx.Request.ContentType.IndexOf("boundary=") + 9;
         var boundary = _ctx.Request.ContentType.Substring(boundary_index, _ctx.Request.ContentType.Length - boundary_index);
 
@@ -375,35 +472,32 @@ public class HttpNameValueCollection
             var content_type = post_variable_string.Substring(content_type_starts, post_variable_string.IndexOf("\r\n", content_type_starts) - content_type_starts);
             var file_data = post_variable_string.Substring(data_starts, post_variable_string.Length - data_starts);
             var name = post_variable_string.Substring(name_starts, post_variable_string.IndexOf("\"", name_starts) - name_starts);
-            Files.Add(name, new File() { FileName = filename, ContentType = content_type, FileData = file_data });
+            Files.Add(name, new HttpFile() { FileName = filename, ContentType = content_type, FileData = file_data });
             continue;
 
         }
     }
 
-    private void PopulatePost()
+    public HttpListenerContext GetContext()
     {
-        if (_ctx.Request.HttpMethod != "POST" || _ctx.Request.ContentType == null) return;
-
-        var post_string = new StreamReader(_ctx.Request.InputStream, _ctx.Request.ContentEncoding).ReadToEnd();
-
-        if (_ctx.Request.ContentType.StartsWith("multipart/form-data"))
-            PopulatePostMultiPart(post_string);
-        else
-            Get = HttpUtility.ParseQueryString(post_string);
-
+        return ctx;
     }
 
-    public HttpNameValueCollection(ref HttpListenerContext ctx)
+    private void PopulatePost(Stream inputStream, Encoding encoding)
     {
-        _ctx = ctx;
-        PopulatePost();
+        var postString = GetContent(inputStream, encoding);
+        Post = HttpUtility.ParseQueryString(postString);
     }
-
-
 }
 
-public class MonkeyResponse
+public class HttpFile
+{
+    public string FileName { get; set; }
+    public string FileData { get; set; }
+    public string ContentType { get; set; }
+}
+
+public class MonkeyResponse : IDisposable
 {
     public MonkeyRequest req;
 
@@ -416,7 +510,8 @@ public class MonkeyResponse
 
     public async void SendToClient()
     {
-        await req.ctx.Response.OutputStream.WriteAsync(content, 0, content.Length);
+        await req.GetContext().Response.OutputStream.WriteAsync(content, 0, content.Length);
+        this.Dispose();
     }
 
     public static MonkeyResponse Text(MonkeyRequest req, string text, int statusCode)
@@ -424,36 +519,66 @@ public class MonkeyResponse
         byte[] data = Encoding.UTF8.GetBytes(text);
 
         //next this!
-        req.ctx.Response.StatusCode = statusCode;
-        req.ctx.Response.ContentType = "text/plain";
-        req.ctx.Response.ContentEncoding = Encoding.UTF8;
-        req.ctx.Response.ContentLength64 = data.LongLength;
+        req.GetContext().Response.StatusCode = statusCode;
+        req.GetContext().Response.ContentType = "text/plain";
+        req.GetContext().Response.ContentEncoding = Encoding.UTF8;
+        req.GetContext().Response.ContentLength64 = data.LongLength;
 
 
-        return new MonkeyResponse(req) { content = data};
+        return new MonkeyResponse(req) { content = data };
     }
 
     public static MonkeyResponse Text(MonkeyRequest req, string text)
     {
         byte[] data = Encoding.UTF8.GetBytes(text);
 
-        req.ctx.Response.StatusCode = 200;
-        req.ctx.Response.ContentType = "application/json";
-        req.ctx.Response.ContentEncoding = Encoding.UTF8;
-        req.ctx.Response.ContentLength64 = data.LongLength;
+        req.GetContext().Response.StatusCode = 200;
+        req.GetContext().Response.ContentType = "application/json";
+        req.GetContext().Response.ContentEncoding = Encoding.UTF8;
+        req.GetContext().Response.ContentLength64 = data.LongLength;
 
         return new MonkeyResponse(req) { content = data };
     }
+
+    public static MonkeyResponse PHP(MonkeyRequest req, string phpFile)
+    {
+
+
+        ProcessStartInfo psi = new ProcessStartInfo
+        {
+            FileName = "./bin/php-cgi.exe",
+            Arguments = $"-f {phpFile}",
+            RedirectStandardOutput = true,
+            UseShellExecute = false,
+            CreateNoWindow = true
+        };
+
+        using (Process process = new Process { StartInfo = psi })
+        {
+            process.Start();
+            string output = process.StandardOutput.ReadToEnd();
+
+            byte[] buffer = Encoding.UTF8.GetBytes(output);
+
+            req.GetContext().Response.StatusCode = 200;
+            req.GetContext().Response.ContentLength64 = buffer.Length;
+            req.GetContext().Response.ContentType = "text/html";
+            req.GetContext().Response.ContentEncoding = Encoding.UTF8;
+
+            return new MonkeyResponse(req) { content = buffer };
+        }
+    }
+
 
     public static MonkeyResponse Json(MonkeyRequest req, object jsonData)
     {
         string jsonString = JsonConvert.SerializeObject(jsonData);
         byte[] data = Encoding.UTF8.GetBytes(jsonString);
 
-        req.ctx.Response.StatusCode = 200;
-        req.ctx.Response.ContentType = "application/json";
-        req.ctx.Response.ContentEncoding = Encoding.UTF8;
-        req.ctx.Response.ContentLength64 = data.LongLength;
+        req.GetContext().Response.StatusCode = 200;
+        req.GetContext().Response.ContentType = "application/json";
+        req.GetContext().Response.ContentEncoding = Encoding.UTF8;
+        req.GetContext().Response.ContentLength64 = data.LongLength;
 
         return new MonkeyResponse(req) { content = data };
     }
@@ -464,10 +589,10 @@ public class MonkeyResponse
         string jsonString = JsonConvert.SerializeObject(jsonData);
         byte[] data = Encoding.UTF8.GetBytes(jsonString);
 
-        req.ctx.Response.StatusCode = statusCode;
-        req.ctx.Response.ContentType = "application/json";
-        req.ctx.Response.ContentEncoding = Encoding.UTF8;
-        req.ctx.Response.ContentLength64 = data.LongLength;
+        req.GetContext().Response.StatusCode = statusCode;
+        req.GetContext().Response.ContentType = "application/json";
+        req.GetContext().Response.ContentEncoding = Encoding.UTF8;
+        req.GetContext().Response.ContentLength64 = data.LongLength;
 
         return new MonkeyResponse(req) { content = data };
     }
@@ -482,7 +607,7 @@ public class MonkeyResponse
         var mreq = BuildContext(req, 200, result);
 
         return new MonkeyResponse(mreq) { content = Encoding.UTF8.GetBytes(result) };
-    
+
     }
 
     public static MonkeyResponse RenderTemplateText(MonkeyRequest req, string templateText, object view, int statusCode)
@@ -502,7 +627,7 @@ public class MonkeyResponse
         byte[] data = Encoding.UTF8.GetBytes(result);
         var mreq = BuildContext(req, 200, result);
 
-        return new MonkeyResponse(mreq) { content = data};
+        return new MonkeyResponse(mreq) { content = data };
     }
 
     public static MonkeyResponse RenderTemplate(MonkeyRequest req, string templatePath, object view, int statusCode)
@@ -525,12 +650,18 @@ public class MonkeyResponse
     {
         byte[] databytes = Encoding.UTF8.GetBytes(data);
 
-        req.ctx.Response.StatusCode = statusCode;
-        req.ctx.Response.ContentType = "text/html";
-        req.ctx.Response.ContentEncoding = Encoding.UTF8;
-        req.ctx.Response.ContentLength64 = databytes.LongLength;
+        req.GetContext().Response.StatusCode = statusCode;
+        req.GetContext().Response.ContentType = "text/html";
+        req.GetContext().Response.ContentEncoding = Encoding.UTF8;
+        req.GetContext().Response.ContentLength64 = databytes.LongLength;
         return req;
     }
 
+    public void Dispose()
+    {
+        req = null;
+        content = null;
+
+    }
 }
 #endregion
