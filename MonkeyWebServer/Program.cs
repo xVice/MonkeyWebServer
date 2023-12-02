@@ -1,8 +1,14 @@
-﻿using MonkeyWebServer;
+﻿using Microsoft.CodeAnalysis;
+using Microsoft.CodeAnalysis.CSharp;
+using Microsoft.CodeAnalysis.CSharp.Scripting;
+using Microsoft.CodeAnalysis.CSharp.Syntax;
+using Microsoft.CodeAnalysis.Scripting;
+using MonkeyWebServer;
 using Newtonsoft.Json;
 using Newtonsoft.Json.Linq;
 using Scriban;
 using System;
+using System.Buffers;
 using System.Collections.Generic;
 using System.Collections.Specialized;
 using System.Diagnostics;
@@ -29,6 +35,262 @@ public class PluginConfig
     }
 }
 
+public class MonkeyEndpointSyntaxWalker : CSharpSyntaxWalker
+{
+    public string ClassName { get; private set; }
+
+    public override void VisitClassDeclaration(ClassDeclarationSyntax node)
+    {
+        if (node.BaseList?.Types.Any(t => t.Type.ToString() == "MonkeyEndpoint") == true)
+        {
+            ClassName = node.Identifier.Text;
+        }
+
+        base.VisitClassDeclaration(node);
+    }
+}
+
+
+public interface IMonkeyPlugin
+{
+    public MonkeyEndpoint GetInstance();
+}
+
+public class Resource
+{
+    public string Name { get; private set; }
+    public string PathInMemory { get; private set; }
+    public List<Resource> SubDirectories { get; private set; }
+
+    public List<string> Resources { get; private set; }
+
+    public Resource(string name, string pathInMemory)
+    {
+        Name = name;
+        PathInMemory = pathInMemory;
+        SubDirectories = new List<Resource>();
+    }
+
+    public Resource(string name, Resource[] subresoucres,string pathInMemory, string[] resources)
+    {
+        Name = name;
+
+        Resources = resources.ToList();
+        PathInMemory = pathInMemory;
+        SubDirectories = subresoucres.ToList();
+    }
+
+    public Resource(string name, List<Resource> subDirectories)
+    {
+        Name = name;
+        PathInMemory = null;
+        SubDirectories = subDirectories;
+    }
+
+    public string Get(string fileName)
+    {
+        if (PathInMemory != null)
+        {
+            try
+            {
+                // Assuming the content is in-memory (e.g., a byte array)
+                return File.ReadAllText(Path.Combine(PathInMemory, fileName));
+                
+            }
+            catch (Exception ex)
+            {
+                Logger.LogError($"Failed to read content for resource '{Name}/{fileName}': {ex.Message}");
+                return null;
+            }
+        }
+        else
+        {
+            Logger.LogError($"Resource '{Name}' is a directory, not a file.");
+            return null;
+        }
+    }
+
+    public string GetPath(string fileName)
+    {
+        if (PathInMemory != null)
+        {
+            try
+            {
+                // Assuming the content is in-memory (e.g., a byte array)
+                return Path.Combine(PathInMemory, fileName);
+
+            }
+            catch (Exception ex)
+            {
+                Logger.LogError($"Failed to read content for resource '{Name}/{fileName}': {ex.Message}");
+                return null;
+            }
+        }
+        else
+        {
+            Logger.LogError($"Resource '{Name}' is a directory, not a file.");
+            return null;
+        }
+    }
+
+    public Resource GetSubResource(string subDirectoryName)
+    {
+        foreach (var subDirectory in SubDirectories)
+        {
+            if (subDirectory.Name == subDirectoryName)
+            {
+                return subDirectory;
+            }
+        }
+
+        // Sub-directory not found
+        Logger.LogError($"Sub-resource '{subDirectoryName}' not found in directory '{Name}'.");
+        return null;
+    }
+
+
+    public static Resource CreateFromDirectory(string directoryPath)
+    {
+        try
+        {
+            string directoryName = Path.GetFileName(directoryPath);
+            List<Resource> subResources = new List<Resource>();
+
+            List<string> files = new List<string>();
+
+            // Add files as resources in the current directory
+            foreach (var file in Directory.GetFiles(directoryPath))
+            {
+                files.Add(file);
+            }
+
+            // Recursively add subdirectories as resources
+            foreach (var subDirectory in Directory.GetDirectories(directoryPath))
+            {
+                subResources.Add(CreateFromDirectory(subDirectory));
+            }
+
+            return new Resource(directoryName, subResources.ToArray(), directoryPath, files.ToArray());
+        }
+        catch (Exception ex)
+        {
+            Logger.LogError($"Failed to create resource from directory path '{directoryPath}': {ex.Message}");
+            return null;
+        }
+    }
+
+
+    public override string ToString()
+    {
+        return ToString(0);
+    }
+
+    private string ToString(int indentationLevel)
+    {
+        StringBuilder sb = new StringBuilder();
+        string indentation = new string(' ', indentationLevel * 2);
+
+        sb.AppendLine($"{indentation}Name: {Name}");
+        sb.AppendLine($"{indentation}PathInMemory: {PathInMemory}");
+
+        if (Resources != null && Resources.Count > 0)
+        {
+            sb.AppendLine($"{indentation}Resources:");
+            foreach (var resource in Resources)
+            {
+                sb.AppendLine($"{indentation}  - {resource}");
+            }
+        }
+
+        if (SubDirectories != null && SubDirectories.Count > 0)
+        {
+            sb.AppendLine($"{indentation}SubDirectories:");
+            foreach (var subDirectory in SubDirectories)
+            {
+                sb.AppendLine(subDirectory.ToString(indentationLevel + 1));
+            }
+        }
+
+        return sb.ToString();
+    }
+
+
+}
+
+public static class ResourcesManager
+{
+    private static Dictionary<string, Resource> resources = new Dictionary<string, Resource>();
+
+    public static void DumpResource(string name)
+    {
+        if (resources.ContainsKey(name))
+        {
+            Console.WriteLine(resources[name].ToString());
+        }
+        else
+        {
+            Logger.Log("Couldnt find the resource with name:" + name);
+        }
+    }
+
+    public static bool RegisterResource(string name, Resource resource)
+    {
+        try
+        {
+            if (!resources.ContainsKey(name))
+            {
+                resources[name] = resource;
+                Logger.Log($"Resource '{name}' registered successfully.");
+                return true;
+            }
+            else
+            {
+                Logger.LogError($"Resource with the name '{name}' already exists. Registration failed.");
+                return false;
+            }
+        }
+        catch (Exception ex)
+        {
+            Logger.LogError($"Failed to register resource '{name}': {ex.Message}");
+            return false;
+        }
+    }
+
+    public static bool RegisterResourceFromPath(string name, string path)
+    {
+        try
+        {
+            Resource resource = Resource.CreateFromDirectory(path);
+            if (resource != null)
+            {
+                return RegisterResource(name, resource);
+            }
+            else
+            {
+                return false;
+            }
+        }
+        catch (Exception ex)
+        {
+            Logger.LogError($"Failed to register resource '{name}' from path '{path}': {ex.Message}");
+            return false;
+        }
+    }
+
+    public static Resource GetResource(string name)
+    {
+        if (resources.ContainsKey(name))
+        {
+            return resources[name];
+        }
+        else
+        {
+            Logger.LogError($"Resource '{name}' not found.");
+            return null;
+        }
+    }
+}
+
 public class MonkeyServer
 {
     private HttpListener listener = null;
@@ -43,7 +305,22 @@ public class MonkeyServer
         this.url = url;
         listener = new HttpListener();
         endPoints = new MonkeyEndpoints();
+        RefreshEndpoints();
         StartServer(debug, verbose);
+    }
+
+    public void RefreshEndpoints()
+    {
+        var directorys = Directory.GetDirectories("./endpoints");
+
+        foreach(var directory in directorys)
+        {
+            if (Directory.Exists(directory))
+            {
+                Logger.Log("Loading " + directory);
+                CompileAndLoadPlugin(directory);
+            }
+        }
     }
 
     public MonkeyEndpoints GetEndpoints()
@@ -134,6 +411,65 @@ public class MonkeyServer
         }
     }
 
+    public void ClearLoadedPluginData()
+    {
+        if (Directory.Exists("./plugindata"))
+        {
+            Directory.Delete("./plugindata", true);
+        }
+        Directory.CreateDirectory("./plugindata");
+    }
+
+
+    public async void CompileAndLoadPlugin(string path)
+    {
+        if (!Directory.Exists(path))
+        {
+            Logger.Log("The Plugin: " + path + ", is not a folder!");
+            return;
+        }
+
+        var csFiles = Directory.GetFiles(path, "*.cs");
+
+        try
+        {
+            var scriptOptions = ScriptOptions.Default
+                .WithReferences(AppDomain.CurrentDomain.GetAssemblies()) // Include necessary assemblies
+                .WithReferences(AppDomain.CurrentDomain.GetAssemblies().Where(a => !a.IsDynamic).Select(a => a.Location)); // Include references to assembly locations
+            ResourcesManager.RegisterResourceFromPath(Path.GetFileName(path), Path.Combine(path, "data"));
+            foreach (var csFile in csFiles)
+            {
+                try
+                {
+                    var scriptCode = File.ReadAllText(csFile);
+                    var script = CSharpScript.Create(scriptCode, ScriptOptions.Default.WithReferences(Assembly.GetExecutingAssembly()));
+                    script.Compile();
+                    // run and you get Type object for your fresh type
+                    var testType = (Type)script.RunAsync().Result.ReturnValue;
+                    // create and cast to interface
+                    var runnable = (MonkeyEndpoint)Activator.CreateInstance(testType);
+                    // use
+                    endPoints.AddEndpoints(runnable);
+                    Logger.Log("Loaded a endpoint");
+                
+
+
+   
+
+        
+                }
+                catch (Exception ex)
+                {
+                    Logger.Log("Error loading plugin from " + csFile + ": " + ex);
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            Logger.Log($"Failed to load endpoint: {path} {Environment.NewLine} {ex}");
+        }
+    }
+
     public void LoadPlugin(string path)
     {
         if (!Directory.Exists(path))
@@ -141,6 +477,10 @@ public class MonkeyServer
             Logger.Log("The Plugin: " + path + ", is not a folder!");
             return;
         }
+
+        ResourcesManager.RegisterResourceFromPath(Path.GetFileName(path), path);
+
+        //ExtractPluginData(path, Path.GetDirectoryName(path));
 
         var cfgFiles = Directory.GetFiles(path, "*.json");
         var dllFiles = Directory.GetFiles(path, "*.dll");
@@ -182,6 +522,48 @@ public class MonkeyServer
             {
                 Logger.Log("Error loading plugin from " + dllFile + ": " + ex);
             }
+        }
+    }
+    private static void ExtractPluginData(string path, string pluginname)
+    {
+        var pluginDataPath = Path.Combine(path, "plugindata");
+
+        if (Directory.Exists(pluginDataPath))
+        {
+            var destinationPath = Path.Combine(".", pluginname, "plugindata");
+
+            // Create the destination directory if it doesn't exist
+            if (!Directory.Exists(destinationPath))
+            {
+                Directory.CreateDirectory(destinationPath);
+            }
+
+            // Copy all files and subdirectories recursively
+            CopyDirectory(pluginDataPath, destinationPath);
+
+            // Log the extraction
+            Logger.Log($"Plugin data extracted from '{pluginDataPath}' to '{destinationPath}'.");
+        }
+        else
+        {
+            Logger.LogError("The 'plugindata' folder does not exist in the specified path.");
+        }
+    }
+
+    private static void CopyDirectory(string sourceDir, string destDir)
+    {
+        // Copy all files
+        foreach (var file in Directory.GetFiles(sourceDir))
+        {
+            var destFile = Path.Combine(destDir, Path.GetFileName(file));
+            File.Copy(file, destFile, true);
+        }
+
+        // Recursively copy subdirectories
+        foreach (var subdirectory in Directory.GetDirectories(sourceDir))
+        {
+            var destSubdirectory = Path.Combine(destDir, Path.GetFileName(subdirectory));
+            CopyDirectory(subdirectory, destSubdirectory);
         }
     }
 
@@ -570,6 +952,8 @@ public class MonkeyResponse : IDisposable
     }
 
 
+
+
     public static MonkeyResponse Json(MonkeyRequest req, object jsonData)
     {
         string jsonString = JsonConvert.SerializeObject(jsonData);
@@ -619,6 +1003,38 @@ public class MonkeyResponse : IDisposable
         return new MonkeyResponse(mreq) { content = data };
     }
 
+
+    public static MonkeyResponse TemplatePHP(MonkeyRequest req, string phpFile, object view)
+    {
+        var tempFile = Path.GetTempFileName();
+
+        File.WriteAllText(tempFile, GetRenderedTemplate(File.ReadAllText(phpFile), view));
+
+
+        ProcessStartInfo psi = new ProcessStartInfo
+        {
+            FileName = "./bin/php-cgi.exe",
+            Arguments = $"-f {tempFile}",
+            RedirectStandardOutput = true,
+            UseShellExecute = false,
+            CreateNoWindow = true
+        };
+
+        using (Process process = new Process { StartInfo = psi })
+        {
+            process.Start();
+            string output = process.StandardOutput.ReadToEnd();
+
+            byte[] buffer = Encoding.UTF8.GetBytes(output);
+
+            req.GetContext().Response.StatusCode = 200;
+            req.GetContext().Response.ContentLength64 = buffer.Length;
+            req.GetContext().Response.ContentType = "text/html";
+            req.GetContext().Response.ContentEncoding = Encoding.UTF8;
+
+            return new MonkeyResponse(req) { content = buffer };
+        }
+    }
 
     public static MonkeyResponse RenderTemplate(MonkeyRequest req, string templatePath, object view)
     {
